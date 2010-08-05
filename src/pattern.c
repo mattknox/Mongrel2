@@ -1,35 +1,5 @@
-/**
- *
- * Copyright (c) 2010, Zed A. Shaw and Mongrel2 Project Contributors.
- * All rights reserved.
- * 
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions are
- * met:
- * 
- *     * Redistributions of source code must retain the above copyright
- *       notice, this list of conditions and the following disclaimer.
- * 
- *     * Redistributions in binary form must reproduce the above copyright
- *       notice, this list of conditions and the following disclaimer in the
- *       documentation and/or other materials provided with the distribution.
- * 
- *     * Neither the name of the Mongrel2 Project, Zed A. Shaw, nor the names
- *       of its contributors may be used to endorse or promote products
- *       derived from this software without specific prior written
- *       permission.
- * 
- * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS
- * IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
- * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
- * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
- * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
- * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
- * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+/*
+ * Based on pattern matching code from Lua removing captures.
  */
 
 #include <dbg.h>
@@ -40,9 +10,6 @@
 #include <ctype.h>
 
 
-/*
- * Based on pattern matching code from Lua removing captures.
- */
 
 typedef struct MatchState {
   const char *src_init;  /* init of source string */
@@ -56,14 +23,14 @@ typedef struct MatchState {
 #define uchar(S) (S)
 
 
-#define L_ESC        '%'
+#define L_ESC        '\\'
 
 
 const char *classend (MatchState *ms, const char *p) {
   switch (*p++) {
     case L_ESC: {
       if (*p == '\0')
-        log_err("malformed pattern (ends with '%c')", *p);
+        log_err("malformed pattern (ends with '\\0')");
       return p+1;
     }
     case '[': {
@@ -72,7 +39,7 @@ const char *classend (MatchState *ms, const char *p) {
         if (*p == '\0')
           log_err("malformed pattern (missing ])");
         if (*(p++) == L_ESC && *p != '\0')
-          p++;  /* skip escapes (e.g. `%]') */
+          p++;  /* skip escapes (e.g. `\\]') */
       } while (*p != ']');
       return p+1;
     }
@@ -200,7 +167,6 @@ const char *bstring_match(bstring s, bstring pattern)
 }
 
 const char *match(MatchState *ms, const char *s, const char *p) {
-    //TODO: get it to understand \ to skip pattern chars
     
   init: /* using goto's to optimize tail recursion */
   switch (*p) {
@@ -221,7 +187,7 @@ const char *match(MatchState *ms, const char *s, const char *p) {
           const char *ep; char previous;
           p += 2;
           if (*p != '[')
-            log_err("missing '[' after %%f in pattern");
+            log_err("missing '[' after \\\\f in pattern");
           ep = classend(ms, p);  /* points to what is next */
           previous = (s == ms->src_init) ? '\0' : *(s-1);
           if (matchbracketclass(uchar(previous), p, ep-1) ||

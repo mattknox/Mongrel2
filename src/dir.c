@@ -43,10 +43,6 @@
 #include <mime.h>
 #include <response.h>
 
-static time_t NOW_DATE = 0;
-static struct tm *NOW_DATE_TM;
-static bstring NOW_DATE_STRING = NULL;
-
 struct tagbstring ETAG_PATTERN = bsStatic("[a-e0-9]+-[a-e0-9]+");
 
 const char *RESPONSE_FORMAT = "HTTP/1.1 200 OK\r\n"
@@ -57,16 +53,18 @@ const char *RESPONSE_FORMAT = "HTTP/1.1 200 OK\r\n"
     "ETag: %s\r\n"
     "Connection: close\r\n\r\n";
 
+const char *DIR_REDIRECT_FORMAT = "HTTP/1.1 301 Moved Permanently\r\n"
+    "Location: http://%s%s/\r\n"
+    "Content-Length: 0\r\n"
+    "Connection: close\r\n\r\n";
+
 const char *RFC_822_TIME = "%a, %d %b %y %T %z";
 
-static Cache *fr_cache = NULL;
-
-
 static int filerecord_cache_lookup(void *data, void *key) {
-    bstring full_path = (bstring) key;
+    bstring request_path = (bstring) key;
     FileRecord *fr = (FileRecord *) data;
     
-    return !bstrcmp(fr->full_path, full_path);
+    return !bstrcmp(fr->request_path, request_path);
 }
 
 static void filerecord_cache_evict(void *data) {
@@ -74,49 +72,25 @@ static void filerecord_cache_evict(void *data) {
 }
 
 
-/**
- * Trying out this for doing the dates faster.  Instead of calling time constantly
- * on every request, we just have a 2 second timer going off and updating a global.
- * That's good enough granularity for practical use, and it let's us later move this
- * into a generic cache cleaning ticker or timeout ticker.
- */
-void Dir_ticktock(void *v)
-{
-    do {
-        NOW_DATE = time(NULL);
-        NOW_DATE_TM = gmtime(&NOW_DATE);
-        bdestroy(NOW_DATE_STRING);
-        NOW_DATE_STRING = bStrfTime(RFC_822_TIME, NOW_DATE_TM);
-        taskdelay(2 * 1000);
-    } while(1);
-}
-
 FileRecord *Dir_find_file(bstring path, bstring default_type)
 {
-    if(fr_cache == NULL) {
-        fr_cache = Cache_create(FR_CACHE_SIZE, filerecord_cache_lookup,
-                                filerecord_cache_evict);
-    }
-    FileRecord *fr;
-    if(fr_cache) {
-        fr = Cache_lookup(fr_cache, path);
-        if(fr) {
-            // We're letting this copy of path go
-            bdestroy(path);
-            fr->users++;
-            return fr;
-        }
-    }
-
-    fr = calloc(sizeof(FileRecord), 1);
+    FileRecord *fr = calloc(sizeof(FileRecord), 1);
     const char *p = bdata(path);
 
     check_mem(fr);
 
-    // right here, if p ends with / then add index.html
+    // We set the number of users here.  If we cache it, we can add one later
+    fr->users = 1;
+
     int rc = stat(p, &fr->sb);
     check(rc == 0, "File stat failed: %s", bdata(path));
 
+    if(S_ISDIR(fr->sb.st_mode)) {
+        fr->full_path = path;
+        fr->is_dir = 1;
+        return fr;
+    }
+    
     fr->fd = open(p, O_RDONLY);
     check(fr->fd >= 0, "Failed to open file but stat worked: %s", bdata(path));
 
@@ -132,10 +106,14 @@ FileRecord *Dir_find_file(bstring path, bstring default_type)
     // we own this now, not the caller
     fr->full_path = path;
 
+    time_t now = time(NULL);
+
+    fr->date = bStrfTime(RFC_822_TIME, gmtime(&now));
+
     fr->etag = bformat("%x-%x", fr->sb.st_mtime, fr->sb.st_size);
 
     fr->header = bformat(RESPONSE_FORMAT,
-        bdata(NOW_DATE_STRING),
+        bdata(fr->date),
         bdata(fr->content_type),
         fr->sb.st_size,
         bdata(fr->last_mod),
@@ -143,18 +121,12 @@ FileRecord *Dir_find_file(bstring path, bstring default_type)
 
     check(fr->header != NULL, "Failed to create response header.");
 
-    // 1 user for each the cache and the guy who called us
-    fr->users = 2;
-
-    Cache_add(fr_cache, fr);
-
     return fr;
 
 error:
     FileRecord_destroy(fr);
     return NULL;
 }
-
 
 inline int Dir_send_header(FileRecord *file, int sock_fd)
 {
@@ -175,7 +147,8 @@ int Dir_stream_file(FileRecord *file, int sock_fd)
         sent = Dir_send(sock_fd, file->fd, &offset, block_size);
         check_debug(sent > 0, "Failed to sendfile on socket: %d from file %d", sock_fd, file->fd);
     }
-
+    
+    check(total == file->sb.st_size, "Did not write enough!");
     check(total <= file->sb.st_size, "Wrote way too much, wrote %d but size was %d", (int)total, (int)file->sb.st_size);
 
     return sent;
@@ -191,7 +164,7 @@ Dir *Dir_create(const char *base, const char *prefix, const char *index_file, co
     check_mem(dir);
 
     dir->base = bfromcstr(base);
-    check(blength(dir->base) < MAX_DIR_PATH, "Base direcotry is too long, must be less than %d", MAX_DIR_PATH);
+    check(blength(dir->base) < MAX_DIR_PATH, "Base directory is too long, must be less than %d", MAX_DIR_PATH);
 
     // dir can come from the routing table so it could have a pattern in it, strip that off
     bstring pattern = bfromcstr(prefix);
@@ -201,12 +174,22 @@ Dir *Dir_create(const char *base, const char *prefix, const char *index_file, co
 
     check(blength(dir->prefix) < MAX_DIR_PATH, "Prefix is too long, must be less than %d", MAX_DIR_PATH);
 
+    check(bchar(dir->prefix, 0) == '/' && bchar(dir->prefix, blength(dir->prefix)-1) == '/',
+                "Dir route prefix (%s) must start with / and end with / or else you break the internet.", prefix);
+
     dir->index_file = bfromcstr(index_file);
     dir->default_ctype = bfromcstr(default_ctype);
+
+    dir->fr_cache = Cache_create(FR_CACHE_SIZE, filerecord_cache_lookup,
+                                 filerecord_cache_evict);
+    check(dir->fr_cache, "Failed to create FileRecord cache");
 
     return dir;
 
 error:
+    if(dir)
+        free(dir);
+
     return NULL;
 }
 
@@ -239,12 +222,14 @@ error:
 void FileRecord_destroy(FileRecord *file)
 {
     if(file) {
-        fdclose(file->fd);
-        bdestroy(file->date);
-        bdestroy(file->last_mod);
-        bdestroy(file->header);
+        if(!file->is_dir) {
+            fdclose(file->fd);
+            bdestroy(file->date);
+            bdestroy(file->last_mod);
+            bdestroy(file->header);
+            bdestroy(file->etag);
+        }
         bdestroy(file->full_path);
-        bdestroy(file->etag);
         // file->content_type is not owned by us
         free(file);
     }
@@ -254,12 +239,14 @@ void FileRecord_destroy(FileRecord *file)
 inline int normalize_path(bstring target)
 {
     ballocmin(target, PATH_MAX);
+    char *path_buf = calloc(PATH_MAX+1, 1);
 
-    char *normalized = realpath((const char *)target->data, NULL);
+    // Some platforms (OSX!) don't allocated for you, so we have to
+    char *normalized = realpath((const char *)target->data, path_buf);
     check(normalized, "Failed to normalize path: %s", bdata(target));
 
     bassigncstr(target, normalized);
-    free(normalized);
+    free(path_buf);
 
     return 0;
 
@@ -282,6 +269,31 @@ error:
     return -1;
 }
 
+FileRecord *FileRecord_cache_check(Dir *dir, bstring path)
+{
+    FileRecord *file = Cache_lookup(dir->fr_cache, path);
+
+    if(file) {
+        time_t now = time(NULL);
+        const char *p = bdata(file->full_path);
+        struct stat sb;
+
+        if(difftime(now, file->loaded) > FR_CACHE_TIME_TO_LIVE) {
+            int rcstat = stat(p, &sb);
+
+            if(rcstat != 0 || file->sb.st_mtime != sb.st_mtime || file->sb.st_size != sb.st_size) {
+                Cache_evict_object(dir->fr_cache, file);
+                file = NULL;
+            } else {
+                file->loaded = now;
+            }
+        }
+    }
+
+    return file;
+}
+
+
 FileRecord *Dir_resolve_file(Dir *dir, bstring path)
 {
     FileRecord *file = NULL;
@@ -294,15 +306,26 @@ FileRecord *Dir_resolve_file(Dir *dir, bstring path)
             "Request for path %s does not start with %s prefix.", 
             bdata(path), bdata(dir->prefix));
 
+    file = FileRecord_cache_check(dir, path);
+
+    if(file) {
+        // TODO: double check this gives the right users count
+        file->users++;
+        return file;
+    }
+
+    // We subtract one from the blengths below, because dir->prefix includes
+    // a trailing '/'.  If we skip over this in path->data, we drop the '/'
+    // from the URI, breaking the target path
     if(bchar(path, blength(path) - 1) == '/') {
-        target = bformat("%s%s/%s",
+        target = bformat("%s%s%s",
                     bdata(dir->normalized_base),
-                    path->data + blength(dir->prefix),
+                    path->data + blength(dir->prefix) - 1,
                     bdata(dir->index_file));
     } else {
-        target = bformat("%s/%s",
+        target = bformat("%s%s",
                 bdata(dir->normalized_base),
-                path->data + blength(dir->prefix));
+                path->data + blength(dir->prefix) - 1);
     }
 
     check(target, "Couldn't construct target path for %s", bdata(path));
@@ -316,6 +339,12 @@ FileRecord *Dir_resolve_file(Dir *dir, bstring path)
     // the FileRecord now owns the target
     file = Dir_find_file(target, dir->default_ctype);
     check_debug(file, "Error opening file: %s", bdata(target));
+
+    // Increment the user count because we're adding it to the cache
+    file->users++;
+    file->request_path = bstrcpy(path);
+    Cache_add(dir->fr_cache, file);
+
 
     return file;
 
@@ -363,6 +392,10 @@ inline bstring Dir_calculate_response(Request *req, FileRecord *file)
     bstring if_none_match = NULL;
 
     if(file) {
+        if(file->is_dir)
+            return bformat(DIR_REDIRECT_FORMAT, bdata(req->host),
+                           bdata(req->uri));
+
         if_match = Request_get(req, &HTTP_IF_MATCH);
 
         if(!if_match || biseqcstr(if_match, "*") || bstring_match(if_match, &ETAG_PATTERN)) {

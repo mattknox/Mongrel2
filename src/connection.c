@@ -48,7 +48,7 @@
 #include <sys/socket.h>
 #include <response.h>
 
-struct tagbstring PING_PATTERN = bsStatic("@[a-z/]- {\"type\":%s*\"ping\"}");
+struct tagbstring PING_PATTERN = bsStatic("@[a-z/]- {\"type\":\\s*\"ping\"}");
 
 #ifdef NDEBUG
 #define TRACE(C)
@@ -127,28 +127,27 @@ int connection_route_request(int event, void *data)
     TRACE(route);
     Connection *conn = (Connection *)data;
     Host *host = NULL;
-    bstring host_name = NULL;
+    bstring pattern = NULL;
 
     bstring path = Request_path(conn->req);
 
     if(conn->req->host_name) {
-        host = Server_match_backend(conn->server, host_name);
+        host = Server_match_backend(conn->server, conn->req->host_name);
     } else {
         host = conn->server->default_host;
     }
-    error_unless(host, conn->fd, 404, "Request for a host we don't have registered: %s", bdata(host_name));
+    error_unless(host, conn->fd, 404, "Request for a host we don't have registered: %s", bdata(conn->req->host_name));
 
-    Backend *found = Host_match_backend(host, path);
+    Backend *found = Host_match_backend(host, path, &pattern);
     error_unless(found, conn->fd, 404, "Handler not found: %s", bdata(path));
 
     Request_set_action(conn->req, found);
     conn->req->target_host = host;
+    conn->req->pattern = pattern;
 
-    bdestroy(host_name);
     return Connection_backend_event(found, conn->fd);
 
 error:
-    bdestroy(host_name);
     return CLOSE;
 }
 
@@ -353,7 +352,7 @@ int connection_proxy_parse(int event, void *data)
         bdestroy(host);
 
         // query up the path to see if it gets the current request action
-        Backend *found = Host_match_backend(target_host, Request_path(conn->req));
+        Backend *found = Host_match_backend(target_host, Request_path(conn->req), NULL);
         error_unless(found, conn->fd, 404, 
                 "Handler not found: %s", bdata(Request_path(conn->req)));
 

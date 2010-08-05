@@ -7,6 +7,7 @@ import getpass
 import sys
 import os
 import signal
+from sqlite3 import OperationalError
 
 
 def shell_command():
@@ -29,13 +30,19 @@ def shell_command():
     try:
 
         while True:
-            cmd = reader.readline()
-            if cmd:
-                args.parse_and_run_command(
-                    cmd.split(' '), mongrel2.config.commands,
-                       default_command=None, exit_on_error=False)
+            try:
+                cmd = reader.readline()
+                if cmd:
+                    args.parse_and_run_command(
+                        cmd.split(' '), mongrel2.config.commands,
+                           default_command=None, exit_on_error=False)
+            except UnicodeDecodeError:
+                print "\nERROR: Sorry, PyRepl and Python hate printing to your screen: UnicodeDecodeError."
+
     except EOFError:
         print "Bye."
+    except KeyboardInterrupt:
+        print "BYE!"
 
 
 
@@ -70,18 +77,26 @@ def dump_command(db=None):
     """
 
     print "LOADING DB: ", db
+
+    try:
+        if not (os.path.isfile(db) and os.access(db, os.R_OK)):
+            raise IOError
     
-    store = model.begin(db)
-    servers = store.find(model.Server)
+        store = model.begin(db)
+        servers = store.find(model.Server)
 
-    for server in servers:
-        print server
+        for server in servers:
+            print server
 
-        for host in server.hosts:
-            print "\t", host
+            for host in server.hosts:
+                print "\t", host
 
-            for route in host.routes:
-                print "\t\t", route
+                for route in host.routes:
+                    print "\t\t", route
+    except IOError:
+        print "%s not readable" % db
+    except OperationalError, exc:
+        print "SQLite error: %s" % exc
 
 
 def uuid_command(hex=False):
@@ -106,47 +121,64 @@ def servers_command(db=None):
 
         m2sh servers -db config.sqlite
     """
-    store = model.begin(db)
-    servers = store.find(model.Server)
-    for server in servers:
-        print "-------"
-        print server.default_host, server.uuid
+    if not os.path.isfile(db):
+        print "ERROR: Cannot access database file %s" % db
+        return
 
-        for host in server.hosts:
-            print "\t", host.id, ':', host.name
+    try:
+        store = model.begin(db)
+        servers = store.find(model.Server)
+        for server in servers:
+            print "-------"
+            print server.default_host, server.uuid
+
+            for host in server.hosts:
+                print "\t", host.id, ':', host.name
+
+    except OperationalError, exc:
+        print "SQLite error: %s" % exc
 
 
 def hosts_command(db=None, uuid="", host=""):
     """
     List all the hosts in the given server identified by UUID or host.
 
-        m2sh servers -db config.sqlite -uuid f400bf85-4538-4f7a-8908-67e313d515c2
-        m2sh servers -db config.sqlite -host localhost
+        m2sh hosts -db config.sqlite -uuid f400bf85-4538-4f7a-8908-67e313d515c2
+        m2sh hosts -db config.sqlite -host localhost
 
     The -host parameter is the default_host for the server.
     """
-    store = model.begin(db)
-    results = None
 
-    if uuid:
-        results = store.find(model.Server, model.Server.uuid == unicode(uuid))
-    elif host:
-        results = store.find(model.Server, model.Server.default_host == unicode(host))
-    else:
-        print "ERROR: Must give a -host or -uuid."
+
+    if not (os.path.isfile(db) and os.access(db, os.R_OK)):
+        print "Cannot read database file %s" % db
         return
 
-    if results.count():
-        server = results[0]
-        hosts = store.find(model.Host, model.Host.server_id == server.id)
-        for host in hosts:
-            print "--------"
-            print host, ":"
-            for route in host.routes:
-                print "\t", route.path, ':', route.target
+    try:
+        store = model.begin(db)
+        results = None
+
+        if uuid:
+            results = store.find(model.Server, model.Server.uuid == unicode(uuid))
+        elif host:
+            results = store.find(model.Server, model.Server.default_host == unicode(host))
+        else:
+            print "ERROR: Must give a -host or -uuid."
+            return
+
+        if results.count():
+            server = results[0]
+            hosts = store.find(model.Host, model.Host.server_id == server.id)
+            for host in hosts:
+                print "--------"
+                print host, ":"
+                for route in host.routes:
+                    print "\t", route.path, ':', route.target
             
-    else:
-        print "No servers found."
+        else:
+            print "No servers found."
+    except OperationalError, exc:
+        print "SQLite error: %s" % exc
 
 
 def init_command(db=None):
@@ -166,10 +198,17 @@ def init_command(db=None):
         model.store.close()
         model.store = None
 
-    conn = sqlite3.connect(db)
-    conn.executescript(sql)
+    if os.path.isfile(db) and not os.access(db, os.W_OK):
+        print "Cannot access database file %s" % db
+        return
+
+    try:
+        conn = sqlite3.connect(db)
+        conn.executescript(sql)
    
-    commit_command(db=db, what="init_command", why=" ".join(sys.argv))
+        commit_command(db=db, what="init_command", why=" ".join(sys.argv))
+    except OperationalError, exc:
+        print "Error: %s" % exc
 
 
 def load_command(db=None, config=None, clear=True):
@@ -182,10 +221,21 @@ def load_command(db=None, config=None, clear=True):
     safer later on.
     """
     import imp
-    model.begin(db, clear=clear)
-    imp.load_source('mongrel2_config_main', config)
 
-    commit_command(db=db, what="load_command", why=" ".join(sys.argv))
+    if not (os.path.isfile(db) and os.access(db, os.R_OK)):
+        print "Cannot access database file %s" % db
+        return
+
+    try:
+
+        model.begin(db, clear=clear)
+        imp.load_source('mongrel2_config_main', config)
+
+        commit_command(db=db, what="load_command", why=" ".join(sys.argv))
+    except OperationalError, exc:
+        print "SQLite error: %s" % exc
+    except SyntaxError,exc:
+        print "Syntax error: %s" % exc
 
 
 def config_command(db=None, config=None, clear=True):
@@ -270,18 +320,47 @@ def start_command(db=None, host=None, sudo=False):
     os.system('%s mongrel2 %s %s' % (root_enabler, db, host))
 
 
-def stop_command(db=None, host=None):
+def stop_command(db=None, host=None, murder=False):
     """
-    Stops a running mongrel2 process according to the host,
-    and just like start will run sudo for you if you give -sudo:
+    Stops a running mongrel2 process according to the host, either
+    gracefully (INT) or murderous (TERM):
 
         m2sh stop -db config.sqlite -host localhost
+        m2sh stop -db config.sqlite -host localhost -murder
 
     You shouldn't need sudo to stop a running mongrel if you
-    are also the user that owns the chroot directory.
+    are also the user that owns the chroot directory or root.
+
+    Normally mongrel2 will wait until connections die off before really
+    leaving, but you can give it the -murder flag and it'll nuke it
+    semi-gracefully.  You can also do it again with -murder if it's waiting
+    for some dead connections and you want it to just quit.
     """
     pid = get_server_pid(db, host)
-    os.kill(pid, signal.SIGTERM)
+    if not pid: return
+
+    sig = signal.SIGTERM if murder else signal.SIGINT
+
+    os.kill(pid, sig)
+
+
+def reload_command(db=None, host=None):
+    """
+    Causes Mongrel2 to do a soft-reload which will re-read the config
+    database and then attempt to load a whole new configuration without
+    losing connections on the previous one:
+
+        m2sh reload -db config.sqlite -host localhost
+
+    This reload will need access to the config database from within the 
+    chroot for it to work, and it's not totally guaranteed to be 100%
+    reliable, but if you are doing development and need to do quick changes
+    then this is what you do.
+    """
+    pid = get_server_pid(db, host)
+    if not pid: return
+
+    os.kill(pid, signal.SIGHUP)
 
 
 def running_command(db=None, host=None):
@@ -292,6 +371,8 @@ def running_command(db=None, host=None):
     """
 
     pid = get_server_pid(db, host)
+    if not pid: return
+
     try:
         os.kill(pid, 0)
         print "YES: Mongrel2 server %s running at PID %d" % (host, pid)
@@ -305,10 +386,15 @@ def get_server_pid(db, host):
 
     if results.count() == 0:
         print "No servers found."
-        return
+        return None
 
     server = results[0]
     pid_file = os.path.realpath(server.chroot + server.pid_file)
+
+    if not os.path.isfile(pid_file):
+        print "ERROR: PID file %s not found." % pid_file
+        return None
+
     pid = int(open(pid_file, 'r').read())
 
     return pid

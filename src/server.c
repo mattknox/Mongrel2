@@ -42,6 +42,7 @@
 #include <string.h>
 #include <mem/halloc.h>
 #include <routing.h>
+#include <setting.h>
 
 int RUNNING=1;
 
@@ -101,7 +102,9 @@ void Server_destroy(Server *srv)
 
 void Server_init()
 {
-    mqinit(2);
+    int mq_threads = Setting_get_int("zeromq.threads", 2);
+    log_info("Starting 0MQ with %d threads.", mq_threads);
+    mqinit(mq_threads);
     Register_init();
 }
 
@@ -130,16 +133,8 @@ void Server_start(Server *srv)
 
     taskname("SERVER");
 
-    if(!srv->listen_fd) {
-        srv->listen_fd = netannounce(TCP, 0, srv->port);
-        check(srv->listen_fd >= 0, "Can't announce on TCP port %d", srv->port);
-
-        check(fdnoblock(srv->listen_fd) == 0, "Failed to set listening port %d nonblocking.", srv->port);
-    }
-
     log_info("Starting server on port %d", srv->port);
 
-    // TODO: this could cause problems if the tst is too deep, recursion may break
     tst_traverse(srv->default_host->routes->routes, handlers_receive_start, srv);
 
     while(RUNNING && (cfd = netaccept(srv->listen_fd, remote, &rport)) >= 0) {
@@ -176,6 +171,8 @@ Host *Server_match_backend(Server *srv, bstring target)
 {
     // TODO: figure out the best matching policy, longest? first? all?
     Route *found = NULL;
+
+    debug("Looking for target host: %s", bdata(target));
 
     list_t *results = RouteMap_match_suffix(srv->hosts, target);
     lnode_t *n = list_first(results);

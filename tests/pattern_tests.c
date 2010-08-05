@@ -37,29 +37,45 @@ char *test_pattern_match()
     // the frontier pattern, kinda weird, could be useful
     // used to find patterns between two other patterns
     m = pattern_match("THE (QUICK) brOWN FOx JUMPS",
-             strlen("THE (QUICK) brOWN FOx JUMPS"), "%f[%a]%u-%f[%a]");
+             strlen("THE (QUICK) brOWN FOx JUMPS"), "\\f[\\a]\\u-\\f[\\a]");
     mu_assert(m != NULL, "Should match.");
 
     // balanced string match, matches the {...} contents
-    m = pattern_match("/users/{1234}", strlen("/users/{1234}"), "/users/%b{}");
+    m = pattern_match("/users/{1234}", strlen("/users/{1234}"), "/users/\\b{}");
     mu_assert(m != NULL, "Should match.");
 
 
     // char classes, which map to C functions:
-    // %a' : isalpha(c)
-    // %c' : iscntrl(c)
-    // %d' : isdigit(c)
-    // %l' : islower(c)
-    // %p' : ispunct(c)
-    // %s' : isspace(c)
-    // %u' : isupper(c)
-    // %w' : isalnum(c)
-    // %x' : isxdigit(c)
-    // %z' : (c == 0)  // NUL terminator
+    // \a : isalpha(c)
+    // \c : iscntrl(c)
+    // \d : isdigit(c)
+    // \l : islower(c)
+    // \p : ispunct(c)
+    // \s : isspace(c)
+    // \u : isupper(c)
+    // \w : isalnum(c)
+    // \x : isxdigit(c)
+    // \z : (c == 0)  // NUL terminator
  
-    m = pattern_match("a \t 9 l . \n U w A \0", 19, "%a %c %d %l %p %s %u %w %x %z");
+    m = pattern_match("a \t 9 l . \n U w A \0", 19, "\\a \\c \\d \\l \\p \\s \\u \\w \\x \\z");
     
     mu_assert(m != NULL, "Should match.");
+
+    // escaped, non-class characters map to themselves
+
+    m = pattern_match("ZED", strlen("ZED"), "Z\\ED");
+
+    mu_assert(m != NULL, "Should match.");
+
+    // escaped special characters are depowered
+
+    m = pattern_match("*Z*E+D.", strlen("*Z*E+D."), "\\*Z\\*E\\+D\\.");
+
+    mu_assert(m != NULL, "Should match.");
+
+    m = pattern_match("ZED!", strlen("ZED!"), "ZED\\.");
+
+    mu_assert(m == NULL, "Should not match.");
 
     return NULL;
 }

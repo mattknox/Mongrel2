@@ -43,6 +43,7 @@
 #include <sys/sendfile.h>
 #endif
 #include <bstring.h>
+#include <cache.h>
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -54,6 +55,7 @@ enum {
 };
 
 typedef struct FileRecord {
+    int is_dir;
     int fd;
     int users;
     time_t loaded;
@@ -61,12 +63,14 @@ typedef struct FileRecord {
     bstring last_mod;
     bstring content_type;
     bstring header;
+    bstring request_path;
     bstring full_path;
     bstring etag;
     struct stat sb;
 } FileRecord;
 
 typedef struct Dir {
+    Cache *fr_cache;
     bstring prefix;
     bstring base;
     bstring normalized_base;
@@ -88,8 +92,6 @@ int Dir_serve_file(Request *req, Dir *dir, bstring path, int fd);
 void FileRecord_release(FileRecord *file);
 void FileRecord_destroy(FileRecord *file);
 
-void Dir_ticktock(void *v);
-
 #ifdef __APPLE__
 #define Dir_send mac_sendfile
 #else
@@ -97,5 +99,6 @@ void Dir_ticktock(void *v);
 #endif
 
 #define FR_CACHE_SIZE 32
+#define FR_CACHE_TIME_TO_LIVE 10.0
 
 #endif
